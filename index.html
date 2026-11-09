@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inventario</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1 id="store-name">Mi Tienda</h1>
+      <p class="subtitle">Gestión de inventario</p>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn ghost" id="btn-export-csv" title="Descargar lista en CSV (Excel)">Exportar CSV</button>
+      <button class="btn ghost" id="btn-backup" title="Descargar copia de seguridad">Copia de seguridad</button>
+      <label class="btn ghost" title="Restaurar desde una copia de seguridad">
+        Restaurar
+        <input type="file" id="input-restore" accept=".json,application/json" hidden>
+      </label>
+      <button class="btn ghost" id="btn-settings">Ajustes</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="stats" aria-label="Resumen">
+      <div class="stat"><span class="stat-label">Productos</span><span class="stat-value" id="stat-products">0</span></div>
+      <div class="stat"><span class="stat-label">Unidades en stock</span><span class="stat-value" id="stat-units">0</span></div>
+      <div class="stat"><span class="stat-label">Valor (costo)</span><span class="stat-value" id="stat-cost">0</span></div>
+      <div class="stat"><span class="stat-label">Valor (venta)</span><span class="stat-value" id="stat-price">0</span></div>
+      <div class="stat warn"><span class="stat-label">Stock bajo</span><span class="stat-value" id="stat-low">0</span></div>
+    </section>
+
+    <section class="toolbar">
+      <input type="search" id="search" placeholder="Buscar por nombre, código o categoría…" autocomplete="off">
+      <select id="filter-category" aria-label="Filtrar por categoría">
+        <option value="">Todas las categorías</option>
+      </select>
+      <label class="check">
+        <input type="checkbox" id="filter-low"> Solo stock bajo
+      </label>
+      <button class="btn primary" id="btn-new">+ Nuevo producto</button>
+    </section>
+
+    <div class="table-wrap">
+      <table class="products">
+        <thead>
+          <tr>
+            <th data-sort="sku">Código</th>
+            <th data-sort="name">Nombre</th>
+            <th data-sort="category">Categoría</th>
+            <th data-sort="stock" class="num">Stock</th>
+            <th data-sort="minStock" class="num">Mínimo</th>
+            <th data-sort="cost" class="num">Costo</th>
+            <th data-sort="price" class="num">Precio</th>
+            <th data-sort="margin" class="num">Margen</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="products-body"></tbody>
+      </table>
+      <p class="empty" id="empty-msg" hidden></p>
+    </div>
+  </main>
+
+  <!-- Formulario de producto -->
+  <dialog id="product-dialog">
+    <form id="product-form" method="dialog" novalidate>
+      <h2 id="product-dialog-title">Nuevo producto</h2>
+      <input type="hidden" name="id">
+      <div class="grid">
+        <label>Código / SKU
+          <input name="sku" maxlength="64" placeholder="Opcional (ej: código de barras)">
+        </label>
+        <label>Nombre *
+          <input name="name" required maxlength="120">
+        </label>
+        <label>Categoría
+          <input name="category" list="category-list" maxlength="60">
+          <datalist id="category-list"></datalist>
+        </label>
+        <label>Unidad
+          <input name="unit" list="unit-list" maxlength="20" placeholder="unidad, kg, litro…">
+          <datalist id="unit-list">
+            <option value="unidad"><option value="kg"><option value="g"><option value="litro">
+            <option value="metro"><option value="caja"><option value="paquete">
+          </datalist>
+        </label>
+        <label>Precio de costo
+          <input name="cost" type="text" inputmode="decimal" placeholder="0">
+        </label>
+        <label>Precio de venta
+          <input name="price" type="text" inputmode="decimal" placeholder="0">
+        </label>
+        <label>Stock actual
+          <input name="stock" type="text" inputmode="decimal" placeholder="0">
+        </label>
+        <label>Stock mínimo
+          <input name="minStock" type="text" inputmode="decimal" placeholder="0" title="Se avisará cuando el stock llegue a este número">
+        </label>
+      </div>
+      <label>Notas
+        <textarea name="notes" rows="2" maxlength="500"></textarea>
+      </label>
+      <p class="form-error" id="form-error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Ajustes -->
+  <dialog id="settings-dialog">
+    <form id="settings-form" method="dialog">
+      <h2>Ajustes</h2>
+      <label>Nombre del comercio
+        <input name="storeName" maxlength="60" required>
+      </label>
+      <label>Símbolo de moneda
+        <input name="currency" maxlength="5" required>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Confirmación -->
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <p id="confirm-text"></p>
+      <div class="dialog-actions">
+        <button value="no" class="btn ghost">Cancelar</button>
+        <button value="yes" class="btn danger">Aceptar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="js/db.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
