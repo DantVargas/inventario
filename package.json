@@ -1,0 +1,50 @@
+{
+  "name": "inventario",
+  "productName": "Inventario",
+  "version": "1.0.0",
+  "description": "Gestión de inventario para cualquier tienda o comercio",
+  "author": "danfr",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node electron/start.js",
+    "test": "node --test tests/file-store.test.js",
+    "pack": "electron-builder --win dir",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.inventario.app",
+    "productName": "Inventario",
+    "copyright": "Inventario",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "index.html",
+      "css/**",
+      "js/**",
+      "vendor/**",
+      "electron/**",
+      "!electron/start.js",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "electron/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Inventario",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

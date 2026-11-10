@@ -7,18 +7,19 @@
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
+  <div class="demo-banner" id="demo-banner" hidden>
+    Modo demo: los cambios no se guardan. Abre <code>index.html</code> sin <code>?demo</code> para usar tu inventario.
+  </div>
+
   <header class="topbar">
     <div>
       <h1 id="store-name">Mi Tienda</h1>
       <p class="subtitle">Gestión de inventario</p>
     </div>
     <div class="topbar-actions">
-      <button class="btn ghost" id="btn-export-csv" title="Descargar lista en CSV (Excel)">Exportar CSV</button>
-      <button class="btn ghost" id="btn-backup" title="Descargar copia de seguridad">Copia de seguridad</button>
-      <label class="btn ghost" title="Restaurar desde una copia de seguridad">
-        Restaurar
-        <input type="file" id="input-restore" accept=".json,application/json" hidden>
-      </label>
+      <button class="btn ghost" id="btn-export-csv" title="Descargar la lista filtrada en CSV (Excel)">Exportar CSV</button>
+      <button class="btn ghost" id="btn-backup" title="Descargar una copia de seguridad de todo el inventario">Copia de seguridad</button>
+      <button class="btn ghost" id="btn-restore" title="Restaurar desde una copia de seguridad">Restaurar</button>
       <button class="btn ghost" id="btn-settings">Ajustes</button>
     </div>
   </header>
@@ -26,20 +27,31 @@
   <main class="container">
     <section class="stats" aria-label="Resumen">
       <div class="stat"><span class="stat-label">Productos</span><span class="stat-value" id="stat-products">0</span></div>
-      <div class="stat"><span class="stat-label">Unidades en stock</span><span class="stat-value" id="stat-units">0</span></div>
       <div class="stat"><span class="stat-label">Valor (costo)</span><span class="stat-value" id="stat-cost">0</span></div>
       <div class="stat"><span class="stat-label">Valor (venta)</span><span class="stat-value" id="stat-price">0</span></div>
-      <div class="stat warn"><span class="stat-label">Stock bajo</span><span class="stat-value" id="stat-low">0</span></div>
+      <button class="stat warn" data-status="low" title="Ver productos con stock bajo">
+        <span class="stat-label">Stock bajo</span><span class="stat-value" id="stat-low">0</span>
+      </button>
+      <button class="stat danger" data-status="out" title="Ver productos sin stock">
+        <span class="stat-label">Sin stock</span><span class="stat-value" id="stat-out">0</span>
+      </button>
     </section>
 
     <section class="toolbar">
-      <input type="search" id="search" placeholder="Buscar por nombre, código o categoría…" autocomplete="off">
+      <input type="search" id="search" placeholder="Buscar por nombre, código o categoría…  (atajo: /)" autocomplete="off">
+      <button class="btn ghost with-icon" id="btn-scan" title="Escanear un código con la cámara para ajustar su stock">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 8v8M10 8v8M13 8v8M17 8v8"/></svg>
+        Escanear
+      </button>
       <select id="filter-category" aria-label="Filtrar por categoría">
         <option value="">Todas las categorías</option>
       </select>
-      <label class="check">
-        <input type="checkbox" id="filter-low"> Solo stock bajo
-      </label>
+      <select id="filter-status" aria-label="Filtrar por estado del stock">
+        <option value="">Todos los estados</option>
+        <option value="alert">Stock bajo o sin stock</option>
+        <option value="low">Solo stock bajo</option>
+        <option value="out">Solo sin stock</option>
+      </select>
       <button class="btn primary" id="btn-new">+ Nuevo producto</button>
     </section>
 
@@ -54,7 +66,8 @@
             <th data-sort="minStock" class="num">Mínimo</th>
             <th data-sort="cost" class="num">Costo</th>
             <th data-sort="price" class="num">Precio</th>
-            <th data-sort="margin" class="num">Margen</th>
+            <th data-sort="markup" class="num" title="Ganancia respecto al costo: (precio − costo) ÷ costo">Recargo</th>
+            <th data-sort="margin" class="num" title="Parte del precio de venta que es ganancia: (precio − costo) ÷ precio">Margen</th>
             <th></th>
           </tr>
         </thead>
@@ -70,34 +83,43 @@
       <h2 id="product-dialog-title">Nuevo producto</h2>
       <input type="hidden" name="id">
       <div class="grid">
-        <label>Código / SKU
-          <input name="sku" maxlength="64" placeholder="Opcional (ej: código de barras)">
-        </label>
+        <div class="field">
+          <label for="sku-input">Código / SKU</label>
+          <div class="input-with-btn">
+            <input name="sku" id="sku-input" maxlength="64" placeholder="Opcional (ej: código de barras)" autocomplete="off">
+            <button type="button" class="btn ghost icon-only" id="btn-scan-sku" title="Escanear con la cámara" aria-label="Escanear con la cámara">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 8v8M10 8v8M13 8v8M17 8v8"/></svg>
+            </button>
+          </div>
+        </div>
         <label>Nombre *
-          <input name="name" required maxlength="120">
+          <input name="name" required maxlength="120" autocomplete="off">
         </label>
-        <label>Categoría
-          <input name="category" list="category-list" maxlength="60">
-          <datalist id="category-list"></datalist>
-        </label>
+        <div class="field">
+          <label for="category-select">Categoría</label>
+          <select id="category-select" name="categoryChoice"></select>
+          <input name="newCategory" id="new-category" maxlength="60" autocomplete="off"
+                 placeholder="Nombre de la nueva categoría" aria-label="Nombre de la nueva categoría" hidden>
+        </div>
         <label>Unidad
-          <input name="unit" list="unit-list" maxlength="20" placeholder="unidad, kg, litro…">
+          <input name="unit" list="unit-list" maxlength="20" placeholder="unidad, kg, litro…" autocomplete="off">
           <datalist id="unit-list">
             <option value="unidad"><option value="kg"><option value="g"><option value="litro">
             <option value="metro"><option value="caja"><option value="paquete">
           </datalist>
         </label>
         <label>Precio de costo
-          <input name="cost" type="text" inputmode="decimal" placeholder="0">
+          <input name="cost" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
         </label>
         <label>Precio de venta
-          <input name="price" type="text" inputmode="decimal" placeholder="0">
+          <input name="price" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
         </label>
+        <p class="price-preview" id="price-preview"></p>
         <label>Stock actual
-          <input name="stock" type="text" inputmode="decimal" placeholder="0">
+          <input name="stock" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
         </label>
         <label>Stock mínimo
-          <input name="minStock" type="text" inputmode="decimal" placeholder="0" title="Se avisará cuando el stock llegue a este número">
+          <input name="minStock" type="text" inputmode="decimal" placeholder="0" autocomplete="off" title="Se avisará cuando el stock llegue a este número">
         </label>
       </div>
       <label>Notas
@@ -111,6 +133,52 @@
     </form>
   </dialog>
 
+  <!-- Ajuste de stock -->
+  <dialog id="adjust-dialog">
+    <form id="adjust-form" method="dialog" novalidate>
+      <h2>Ajustar stock</h2>
+      <p class="adjust-product" id="adjust-product"></p>
+      <div class="segmented" role="radiogroup" aria-label="Tipo de ajuste">
+        <label><input type="radio" name="mode" value="in" checked><span>Entrada</span></label>
+        <label><input type="radio" name="mode" value="out"><span>Salida</span></label>
+        <label><input type="radio" name="mode" value="set"><span>Fijar total</span></label>
+      </div>
+      <label><span id="adjust-qty-label">Cantidad que entra</span>
+        <input name="qty" type="text" inputmode="decimal" autocomplete="off">
+      </label>
+      <p class="adjust-preview" id="adjust-preview"></p>
+      <p class="form-error" id="adjust-error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Aplicar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Escáner de códigos con la cámara -->
+  <dialog id="scan-dialog">
+    <h2>Escanear código</h2>
+    <div class="scan-view">
+      <video id="scan-video" muted playsinline></video>
+      <div class="scan-frame" aria-hidden="true"><span class="scan-line"></span></div>
+    </div>
+    <p class="scan-status" id="scan-status" role="status"></p>
+    <div class="scan-options">
+      <select id="scan-camera" aria-label="Cámara" hidden></select>
+      <label class="check" id="scan-continuous-wrap">
+        <input type="checkbox" id="scan-continuous">
+        Modo rápido: volver a escanear después de cada producto
+      </label>
+    </div>
+    <form id="scan-manual" class="scan-manual" novalidate>
+      <input id="scan-manual-input" placeholder="O escribe el código (o usa un lector USB)" autocomplete="off" aria-label="Código">
+      <button class="btn ghost" type="submit">Usar código</button>
+    </form>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="scan-cancel">Cerrar</button>
+    </div>
+  </dialog>
+
   <!-- Ajustes -->
   <dialog id="settings-dialog">
     <form id="settings-form" method="dialog">
@@ -121,6 +189,12 @@
       <label>Símbolo de moneda
         <input name="currency" maxlength="5" required>
       </label>
+      <div class="desktop-data" id="desktop-data" hidden>
+        <p><strong>Tus datos</strong> se guardan en este equipo, en:</p>
+        <p><code id="desktop-data-path"></code></p>
+        <p class="muted">Cada día se hace una copia automática (se guardan las últimas 30).</p>
+        <button type="button" class="btn ghost" id="btn-open-data">Abrir carpeta de datos</button>
+      </div>
       <div class="dialog-actions">
         <button type="button" class="btn ghost" data-close>Cancelar</button>
         <button type="submit" class="btn primary">Guardar</button>
@@ -134,14 +208,20 @@
       <p id="confirm-text"></p>
       <div class="dialog-actions">
         <button value="no" class="btn ghost">Cancelar</button>
-        <button value="yes" class="btn danger">Aceptar</button>
+        <button value="yes" class="btn danger" id="confirm-ok">Aceptar</button>
       </div>
     </form>
   </dialog>
 
   <div class="toast" id="toast" role="status" hidden></div>
 
-  <script src="js/db.js"></script>
+  <!-- El orden importa: lógica, almacenamiento, plataforma y, al final, la interfaz. -->
+  <script src="js/core/inventory.js"></script>
+  <script src="js/storage/indexeddb.js"></script>
+  <script src="js/storage/memory.js"></script>
+  <script src="js/storage/index.js"></script>
+  <script src="js/platform.js"></script>
+  <script src="js/scanner.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Pruebas · Inventario</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; background: #fff; color: #1d2330; }
+    #summary { font-size: 1.2rem; font-weight: 600; }
+    .pass { color: #15803d; } .fail { color: #dc2626; }
+    li { margin: 2px 0; font-family: ui-monospace, Consolas, monospace; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Pruebas de la lógica del inventario</h1>
+  <p id="summary">Ejecutando…</p>
+  <ul id="results"></ul>
+
+  <script src="../js/core/inventory.js"></script>
+  <script src="../js/storage/memory.js"></script>
+  <script src="../js/scanner.js"></script>
+  <script>
+  (async () => {
+    const I = window.Inventory;
+    const results = [];
+    const test = async (name, fn) => {
+      try { await fn(); results.push({ name, ok: true }); }
+      catch (e) { results.push({ name, ok: false, msg: e.message }); }
+    };
+    const eq = (a, b, what = '') => {
+      const sa = JSON.stringify(a), sb = JSON.stringify(b);
+      if (sa !== sb) throw new Error(`${what} esperado ${sb}, obtenido ${sa}`);
+    };
+    const prod = (o) => I.normalizeProduct({ name: 'X', ...o });
+
+    await test('parseNumber acepta coma y punto', () => {
+      eq(I.parseNumber('2,25'), 2.25); eq(I.parseNumber('2.25'), 2.25);
+      eq(I.parseNumber(''), 0); eq(I.parseNumber(3), 3);
+      eq(Number.isNaN(I.parseNumber('abc')), true); eq(Number.isNaN(I.parseNumber('1,2,3')), true);
+    });
+
+    await test('validateProduct: nombre obligatorio, números válidos, código único sin mayúsculas', () => {
+      eq(I.validateProduct({ name: '' }).field, 'name');
+      eq(I.validateProduct({ name: 'A', price: 'diez' }).field, 'price');
+      eq(I.validateProduct({ name: 'A', stock: '-1' }).field, 'stock');
+      const list = [prod({ id: 'p1', sku: 'ABC' })];
+      eq(I.validateProduct({ name: 'B', sku: 'abc' }, list).field, 'sku');
+      eq(I.validateProduct({ id: 'p1', name: 'A', sku: 'ABC' }, list), null, 'editar el mismo producto');
+    });
+
+    await test('normalizeProduct conserva createdAt al editar', () => {
+      const existing = prod({ id: 'p1' });
+      existing.createdAt = '2025-01-01T00:00:00.000Z';
+      const edited = I.normalizeProduct({ id: 'p1', name: 'Y' }, { existing });
+      eq(edited.createdAt, '2025-01-01T00:00:00.000Z');
+      eq(edited.sku, undefined, 'código vacío');
+      eq(edited.unit, 'unidad');
+    });
+
+    await test('stockStatus: sin stock, bajo y normal', () => {
+      eq(I.stockStatus(prod({ stock: 0, minStock: 5 })), 'out');
+      eq(I.stockStatus(prod({ stock: 0 })), 'out');
+      eq(I.stockStatus(prod({ stock: 5, minStock: 5 })), 'low');
+      eq(I.stockStatus(prod({ stock: 6, minStock: 5 })), 'ok');
+      eq(I.stockStatus(prod({ stock: 1 })), 'ok', 'sin mínimo definido');
+    });
+
+    await test('recargo y margen', () => {
+      const p = prod({ cost: 100, price: 150 });
+      eq(I.markup(p), 50); eq(Math.round(I.margin(p) * 100) / 100, 33.33);
+      eq(I.markup(prod({ cost: 0, price: 10 })), null);
+      eq(I.margin(prod({ cost: 5, price: 0 })), null);
+    });
+
+    await test('totals no mezcla unidades y cuenta alertas por separado', () => {
+      const t = I.totals([prod({ stock: 2, cost: 1.1, price: 2 }), prod({ stock: 0, minStock: 3 }), prod({ stock: 1, minStock: 3 })]);
+      eq(t, { count: 3, costValue: 2.2, priceValue: 4, low: 1, out: 1 });
+    });
+
+    await test('applyAdjustment: entrada, salida, fijar y errores', () => {
+      eq(I.applyAdjustment(10, 'in', '24'), { stock: 34 });
+      eq(I.applyAdjustment(4.75, 'out', '0,25'), { stock: 4.5 });
+      eq(I.applyAdjustment(10, 'set', '7'), { stock: 7 });
+      eq(I.applyAdjustment(10, 'set', '0'), { stock: 0 });
+      eq(!!I.applyAdjustment(3, 'out', '5').error, true, 'salida mayor al stock');
+      eq(!!I.applyAdjustment(3, 'in', '0').error, true, 'entrada de 0');
+      eq(!!I.applyAdjustment(3, 'in', '').error, true, 'vacío');
+      eq(!!I.applyAdjustment(3, 'in', 'x').error, true, 'texto');
+      eq(I.applyAdjustment(0.1, 'in', '0,2'), { stock: 0.3 }, 'sin error de redondeo');
+    });
+
+    await test('matchesFilter y sortProducts', () => {
+      const a = prod({ name: 'Arroz', sku: 'A1', category: 'Almacén', stock: 0 });
+      const b = prod({ name: 'Leche', category: 'Lácteos', stock: 2, minStock: 5, cost: 1, price: 3 });
+      eq(I.matchesFilter(a, { query: 'a1' }), true);
+      eq(I.matchesFilter(a, { status: 'low' }), false);
+      eq(I.matchesFilter(b, { status: 'alert' }), true);
+      eq(I.sortProducts([b, a], 'name').map(p => p.name), ['Arroz', 'Leche']);
+      eq(I.sortProducts([a, b], 'markup', 'desc').map(p => p.name), ['Leche', 'Arroz']);
+    });
+
+    await test('prepareImport conserva fechas, cuenta omitidos y corrige ids repetidos', () => {
+      const r = I.prepareImport({
+        settings: { storeName: 'Kiosco', currency: '€' },
+        products: [
+          { id: 'x', name: 'A', createdAt: '2024-05-01T10:00:00.000Z', updatedAt: '2024-06-01T10:00:00.000Z' },
+          { id: 'x', name: 'B' },
+          { name: '' }, null, 'basura',
+        ],
+      });
+      eq(r.products.length, 2); eq(r.skipped, 3);
+      eq(r.products[0].createdAt, '2024-05-01T10:00:00.000Z');
+      eq(r.products[0].updatedAt, '2024-06-01T10:00:00.000Z');
+      eq(r.products[0].id !== r.products[1].id, true, 'ids distintos');
+      eq(r.settings, { storeName: 'Kiosco', currency: '€' });
+    });
+
+    await test('prepareImport rechaza códigos repetidos y archivos sin productos', () => {
+      eq(!!I.prepareImport({ products: [{ name: 'A', sku: 'Z' }, { name: 'B', sku: 'z' }] }).error, true);
+      eq(!!I.prepareImport({ foo: 1 }).error, true);
+      eq(I.prepareImport([{ name: 'A' }]).products.length, 1, 'acepta lista suelta');
+    });
+
+    await test('buildCsv: separador ;, coma decimal y protección de fórmulas', () => {
+      const csv = I.buildCsv([prod({ sku: '=1+1', name: 'Pan; grande', price: 2.5 })]);
+      const line = csv.split('\r\n')[1];
+      eq(line.startsWith("'=1+1;\"Pan; grande\""), true, 'línea ' + line);
+      eq(line.includes(';2,5;'), true);
+      eq(csv.charCodeAt(0), 0xFEFF, 'BOM');
+    });
+
+    await test('almacenamiento en memoria: código único y restaurar todo o nada', async () => {
+      const s = StorageAdapters.memory();
+      await s.saveProduct(prod({ id: '1', sku: 'A' }));
+      let failed = false;
+      try { await s.saveProduct(prod({ id: '2', sku: 'A' })); } catch (e) { failed = e.name === 'ConstraintError'; }
+      eq(failed, true, 'rechaza código repetido');
+      failed = false;
+      try { await s.replaceAllProducts([prod({ id: '3', sku: 'B' }), prod({ id: '4', sku: 'B' })]); } catch { failed = true; }
+      eq(failed, true);
+      eq((await s.listProducts()).map(p => p.id), ['1'], 'no cambió nada tras el fallo');
+    });
+
+    await test('listCategories: sin repetir, sin vacías y ordenadas', () => {
+      const list = [prod({ category: 'Lácteos' }), prod({ category: 'almacén' }), prod({ category: 'lacteos' }), prod({ category: '' })];
+      eq(I.listCategories(list), ['almacén', 'Lácteos']);
+    });
+
+    await test('resolveCategory reutiliza la existente sin importar mayúsculas, tildes ni espacios', () => {
+      const cats = ['Lácteos', 'Bebidas'];
+      eq(I.resolveCategory('lacteos', cats), 'Lácteos');
+      eq(I.resolveCategory('  BEBIDAS ', cats), 'Bebidas');
+      eq(I.resolveCategory('Panadería   fina', cats), 'Panadería fina', 'nueva, con espacios limpios');
+      eq(I.resolveCategory('   ', cats), '');
+    });
+
+    await test('findBySku y looksLikeBarcode', () => {
+      const list = [prod({ id: '1', sku: 'AB-12' }), prod({ id: '2', sku: '7790001' }), prod({ id: '3' })];
+      eq(I.findBySku(list, ' ab-12 ').id, '1');
+      eq(I.findBySku(list, '7790001').id, '2');
+      eq(I.findBySku(list, '779000'), null, 'no acepta coincidencias parciales');
+      eq(I.findBySku(list, ''), null, 'vacío no coincide con productos sin código');
+      eq(I.looksLikeBarcode('7790001234567'), true);
+      eq(I.looksLikeBarcode('arroz'), false);
+      eq(I.looksLikeBarcode('12345'), false);
+    });
+
+    // Dibuja un EAN-13 real en un canvas (como lo vería la cámara) y lo lee con el escáner.
+    function drawEan13(code12) {
+      const L = ['0001101','0011001','0010011','0111101','0100011','0110001','0101111','0111011','0110111','0001011'];
+      const G = ['0100111','0110011','0011011','0100001','0011101','0111001','0000101','0010001','0001001','0010111'];
+      const R = L.map(p => p.replace(/./g, b => (b === '0' ? '1' : '0')));
+      const PARITY = ['LLLLLL','LLGLGG','LLGGLG','LLGGGL','LGLLGG','LGGLLG','LGGGLL','LGLGLG','LGLGGL','LGGLGL'];
+      const d = code12.split('').map(Number);
+      const sum = d.reduce((s, n, i) => s + n * (i % 2 ? 3 : 1), 0);
+      const full = code12 + ((10 - (sum % 10)) % 10);
+      const digits = full.split('').map(Number);
+      let bits = '101';
+      for (let i = 1; i <= 6; i++) bits += (PARITY[digits[0]][i - 1] === 'L' ? L : G)[digits[i]];
+      bits += '01010';
+      for (let i = 7; i <= 12; i++) bits += R[digits[i]];
+      bits += '101';
+      const mod = 4, quiet = 12 * mod;
+      const c = document.createElement('canvas');
+      c.width = bits.length * mod + quiet * 2; c.height = 160;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = '#000';
+      [...bits].forEach((b, i) => { if (b === '1') ctx.fillRect(quiet + i * mod, 20, mod, 120); });
+      return { canvas: c, code: full };
+    }
+
+    await test('el escáner lee un código EAN-13 dibujado', async () => {
+      const { canvas, code } = drawEan13('779000123456');
+      eq(await Scanner.decodeCanvas(canvas), code);
+    });
+
+    await test('el escáner no inventa códigos en una imagen vacía', async () => {
+      const c = document.createElement('canvas'); c.width = 400; c.height = 200;
+      const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 400, 200);
+      eq(await Scanner.decodeCanvas(c), null);
+    });
+
+    const ok = results.filter(r => r.ok).length;
+    const summary = document.getElementById('summary');
+    summary.textContent = `${ok} de ${results.length} pruebas correctas`;
+    summary.className = ok === results.length ? 'pass' : 'fail';
+    document.getElementById('results').innerHTML = results.map(r =>
+      `<li class="${r.ok ? 'pass' : 'fail'}">${r.ok ? '✔' : '✘'} ${r.name}${r.ok ? '' : ' — ' + r.msg}</li>`).join('');
+  })();
+  </script>
+</body>
+</html>

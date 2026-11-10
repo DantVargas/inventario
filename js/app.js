@@ -1,9 +1,18 @@
-// Lógica de la interfaz: productos y stock.
+// Interfaz: conecta la pantalla con la lógica (Inventory), los datos (Store)
+// y los archivos (Platform). No guarda nada por su cuenta.
 (() => {
+  'use strict';
+  const I = window.Inventory;
+  const Store = window.Store;
+  const Platform = window.Platform;
+
   const state = {
     products: [],
-    settings: { storeName: 'Mi Tienda', currency: '$' },
+    settings: { ...I.DEFAULT_SETTINGS },
     sort: { key: 'name', dir: 'asc' },
+    adjustingId: null, // id del producto abierto en el diálogo de ajuste
+    lastAdjustMode: 'in', // se recuerda para escanear varios productos seguidos
+    rescanAfter: false, // modo rápido: reabrir la cámara al terminar
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -13,36 +22,58 @@
     empty: $('#empty-msg'),
     search: $('#search'),
     filterCategory: $('#filter-category'),
-    filterLow: $('#filter-low'),
-    categoryList: $('#category-list'),
+    filterStatus: $('#filter-status'),
+    categorySelect: $('#category-select'),
+    newCategory: $('#new-category'),
     productDialog: $('#product-dialog'),
     productForm: $('#product-form'),
     productTitle: $('#product-dialog-title'),
+    pricePreview: $('#price-preview'),
     formError: $('#form-error'),
+    adjustDialog: $('#adjust-dialog'),
+    adjustForm: $('#adjust-form'),
+    adjustProduct: $('#adjust-product'),
+    adjustQtyLabel: $('#adjust-qty-label'),
+    adjustPreview: $('#adjust-preview'),
+    adjustError: $('#adjust-error'),
     settingsDialog: $('#settings-dialog'),
     settingsForm: $('#settings-form'),
     confirmDialog: $('#confirm-dialog'),
     confirmText: $('#confirm-text'),
+    confirmOk: $('#confirm-ok'),
+    scanDialog: $('#scan-dialog'),
+    scanView: $('.scan-view'),
+    scanVideo: $('#scan-video'),
+    scanStatus: $('#scan-status'),
+    scanCamera: $('#scan-camera'),
+    scanContinuous: $('#scan-continuous'),
+    scanContinuousWrap: $('#scan-continuous-wrap'),
+    scanManual: $('#scan-manual'),
+    scanManualInput: $('#scan-manual-input'),
     toast: $('#toast'),
   };
 
-  // ---------- Utilidades ----------
+  // Preferencias de este equipo (cámara elegida, modo rápido). Si no se pueden guardar, no pasa nada.
+  const prefs = {
+    get(key, fallback) {
+      try { const v = localStorage.getItem('inventario.' + key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }
+    },
+    set(key, value) {
+      try { localStorage.setItem('inventario.' + key, JSON.stringify(value)); } catch { /* sin almacenamiento */ }
+    },
+  };
+
+  // ---------- Formato y avisos ----------
   const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
   ));
   const numFmt = new Intl.NumberFormat('es', { maximumFractionDigits: 3 });
   const moneyFmt = new Intl.NumberFormat('es', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const num = (n) => numFmt.format(n || 0);
   const money = (n) => `${state.settings.currency} ${moneyFmt.format(n || 0)}`;
-  const toNum = (v) => {
-    const n = parseFloat(String(v ?? '').replace(',', '.'));
-    return Number.isFinite(n) ? n : 0;
-  };
-  // Redondeo para evitar errores tipo 0.1 + 0.2 = 0.30000000000000004
-  const round = (n) => Math.round(n * 1000) / 1000;
-  const newId = () => (crypto.randomUUID ? crypto.randomUUID()
-    : Date.now().toString(36) + Math.random().toString(36).slice(2));
-  const isLow = (p) => p.minStock > 0 && p.stock <= p.minStock;
-  const margin = (p) => (p.cost > 0 ? ((p.price - p.cost) / p.cost) * 100 : null);
+  const pct = (n) => (n === null ? null : `${numFmt.format(Math.round(n))}%`);
+  const errMsg = (err) => (err && err.message) || String(err);
+  const today = () => new Date().toISOString().slice(0, 10);
 
   let toastTimer;
   function toast(msg, isError = false) {
@@ -50,110 +81,123 @@
     el.toast.classList.toggle('error', isError);
     el.toast.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { el.toast.hidden = true; }, 2800);
+    toastTimer = setTimeout(() => { el.toast.hidden = true; }, isError ? 5000 : 2800);
   }
 
-  function confirmAction(text) {
+  // Responde al pulsar un botón (submit); el cierre (tecla Esc) queda como respaldo.
+  function confirmAction(text, { okLabel = 'Aceptar', danger = true } = {}) {
+    el.confirmOk.textContent = okLabel;
+    el.confirmOk.className = `btn ${danger ? 'danger' : 'primary'}`;
     return new Promise(resolve => {
+      const dialog = el.confirmDialog;
+      const form = dialog.querySelector('form');
+      let done = false;
+      const finish = (answer) => {
+        if (done) return;
+        done = true;
+        form.removeEventListener('submit', onSubmit);
+        dialog.removeEventListener('close', onClose);
+        resolve(answer);
+      };
+      const onSubmit = (e) => finish(!!e.submitter && e.submitter.value === 'yes');
+      const onClose = () => finish(dialog.returnValue === 'yes');
+      form.addEventListener('submit', onSubmit);
+      dialog.addEventListener('close', onClose);
       el.confirmText.textContent = text;
-      el.confirmDialog.returnValue = '';
-      el.confirmDialog.addEventListener('close', () => resolve(el.confirmDialog.returnValue === 'yes'), { once: true });
-      el.confirmDialog.showModal();
+      dialog.returnValue = '';
+      dialog.showModal();
     });
-  }
-
-  // Normaliza un producto (del formulario o de una copia importada).
-  function normalize(raw, existing) {
-    const now = new Date().toISOString();
-    const sku = String(raw.sku ?? '').trim();
-    return {
-      id: raw.id || existing?.id || newId(),
-      sku: sku || undefined, // undefined = sin código (no choca en el índice único)
-      name: String(raw.name ?? '').trim(),
-      category: String(raw.category ?? '').trim(),
-      unit: String(raw.unit ?? '').trim() || 'unidad',
-      cost: Math.max(0, toNum(raw.cost)),
-      price: Math.max(0, toNum(raw.price)),
-      stock: Math.max(0, round(toNum(raw.stock))),
-      minStock: Math.max(0, toNum(raw.minStock)),
-      notes: String(raw.notes ?? '').trim(),
-      createdAt: raw.createdAt || existing?.createdAt || now,
-      updatedAt: now,
-    };
   }
 
   // ---------- Render ----------
-  function filtered() {
-    const q = el.search.value.trim().toLowerCase();
-    const cat = el.filterCategory.value;
-    const onlyLow = el.filterLow.checked;
-    const list = state.products.filter(p => {
-      if (cat && p.category !== cat) return false;
-      if (onlyLow && !isLow(p)) return false;
-      if (!q) return true;
-      return [p.name, p.sku, p.category].some(v => (v || '').toLowerCase().includes(q));
-    });
-    const { key, dir } = state.sort;
-    const factor = dir === 'asc' ? 1 : -1;
-    const val = (p) => (key === 'margin' ? (margin(p) ?? -Infinity) : p[key]);
-    return list.sort((a, b) => {
-      const va = val(a), vb = val(b);
-      if (typeof va === 'number' || typeof vb === 'number') return ((va ?? 0) - (vb ?? 0)) * factor;
-      return String(va ?? '').localeCompare(String(vb ?? ''), 'es', { sensitivity: 'base', numeric: true }) * factor;
-    });
+  function visibleProducts() {
+    const filter = {
+      query: el.search.value,
+      category: el.filterCategory.value,
+      status: el.filterStatus.value,
+    };
+    const list = state.products.filter(p => I.matchesFilter(p, filter));
+    return I.sortProducts(list, state.sort.key, state.sort.dir);
   }
 
   function renderStats() {
-    const ps = state.products;
-    $('#stat-products').textContent = numFmt.format(ps.length);
-    $('#stat-units').textContent = numFmt.format(round(ps.reduce((s, p) => s + p.stock, 0)));
-    $('#stat-cost').textContent = money(ps.reduce((s, p) => s + p.stock * p.cost, 0));
-    $('#stat-price').textContent = money(ps.reduce((s, p) => s + p.stock * p.price, 0));
-    $('#stat-low').textContent = numFmt.format(ps.filter(isLow).length);
+    const t = I.totals(state.products);
+    $('#stat-products').textContent = num(t.count);
+    $('#stat-cost').textContent = money(t.costValue);
+    $('#stat-price').textContent = money(t.priceValue);
+    $('#stat-low').textContent = num(t.low);
+    $('#stat-out').textContent = num(t.out);
   }
 
   function renderCategories() {
-    const cats = [...new Set(state.products.map(p => p.category).filter(Boolean))]
-      .sort((a, b) => a.localeCompare(b, 'es'));
+    const cats = I.listCategories(state.products);
     const current = el.filterCategory.value;
     el.filterCategory.innerHTML = '<option value="">Todas las categorías</option>' +
       cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
     el.filterCategory.value = cats.includes(current) ? current : '';
-    el.categoryList.innerHTML = cats.map(c => `<option value="${escapeHtml(c)}">`).join('');
+  }
+
+  // ---------- Selector de categoría del formulario ----------
+  const NEW_CATEGORY = '__new__';
+
+  function fillCategorySelect(selected) {
+    const cats = I.listCategories(state.products);
+    el.categorySelect.innerHTML =
+      '<option value="">Sin categoría</option>' +
+      (cats.length ? `<optgroup label="Categorías existentes">${
+        cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</optgroup>` : '') +
+      `<option value="${NEW_CATEGORY}">+ Nueva categoría…</option>`;
+    el.categorySelect.value = cats.includes(selected) ? selected : '';
+    toggleNewCategory(false);
+  }
+
+  function toggleNewCategory(focus = true) {
+    const isNew = el.categorySelect.value === NEW_CATEGORY;
+    el.newCategory.hidden = !isNew;
+    if (!isNew) el.newCategory.value = '';
+    else if (focus) el.newCategory.focus();
+  }
+
+  const dash = '<span class="muted">—</span>';
+  const pctCell = (n) => (n === null ? dash : `<span class="${n < 0 ? 'neg' : 'pos'}">${pct(n)}</span>`);
+
+  function rowHtml(p) {
+    const status = I.stockStatus(p);
+    return `
+      <tr data-id="${escapeHtml(p.id)}" class="status-${status}">
+        <td>${p.sku ? escapeHtml(p.sku) : dash}</td>
+        <td class="name">${escapeHtml(p.name)}</td>
+        <td>${p.category ? escapeHtml(p.category) : dash}</td>
+        <td class="num">
+          <span class="stock-cell">
+            <button class="btn small" data-action="dec" title="Restar 1" ${p.stock < 1 ? 'disabled' : ''}>−</button>
+            <button class="stock-value" data-action="adjust" title="Ajustar cantidad">
+              ${num(p.stock)} <span class="unit">${escapeHtml(p.unit)}</span>
+            </button>
+            <button class="btn small" data-action="inc" title="Sumar 1">+</button>
+          </span>
+        </td>
+        <td class="num">${p.minStock ? num(p.minStock) : dash}</td>
+        <td class="num">${money(p.cost)}</td>
+        <td class="num">${money(p.price)}</td>
+        <td class="num">${pctCell(I.markup(p))}</td>
+        <td class="num">${pctCell(I.margin(p))}</td>
+        <td class="num actions">
+          <button class="btn link" data-action="edit">Editar</button>
+          <button class="btn link del" data-action="delete">Eliminar</button>
+        </td>
+      </tr>`;
   }
 
   function renderTable() {
-    const list = filtered();
-    el.body.innerHTML = list.map(p => {
-      const m = margin(p);
-      const mHtml = m === null ? '<span class="muted">—</span>'
-        : `<span class="${m < 0 ? 'margin-neg' : 'margin-pos'}">${numFmt.format(Math.round(m))}%</span>`;
-      return `
-        <tr data-id="${p.id}" class="${isLow(p) ? 'low' : ''}">
-          <td>${p.sku ? escapeHtml(p.sku) : '<span class="muted">—</span>'}</td>
-          <td class="name">${escapeHtml(p.name)}</td>
-          <td>${p.category ? escapeHtml(p.category) : '<span class="muted">—</span>'}</td>
-          <td class="num">
-            <span class="stock-cell">
-              <button class="btn small" data-action="dec" title="Restar 1">−</button>
-              <span class="${isLow(p) ? 'badge-low' : ''}">${numFmt.format(p.stock)}</span>
-              <span class="unit">${escapeHtml(p.unit)}</span>
-              <button class="btn small" data-action="inc" title="Sumar 1">+</button>
-            </span>
-          </td>
-          <td class="num">${p.minStock ? numFmt.format(p.minStock) : '<span class="muted">—</span>'}</td>
-          <td class="num">${money(p.cost)}</td>
-          <td class="num">${money(p.price)}</td>
-          <td class="num">${mHtml}</td>
-          <td class="num">
-            <button class="btn link" data-action="edit">Editar</button>
-            <button class="btn link del" data-action="delete">Eliminar</button>
-          </td>
-        </tr>`;
-    }).join('');
+    const list = visibleProducts();
+    el.body.innerHTML = list.map(rowHtml).join('');
 
     if (state.products.length === 0) {
-      el.empty.textContent = 'Todavía no hay productos. Pulsa "+ Nuevo producto" para empezar.';
+      el.empty.textContent = 'Todavía no hay productos. Pulsa "+ Nuevo producto" para empezar.' +
+        (Store && Store.kind === 'desktop'
+          ? ' ¿Ya tenías productos en la versión del navegador? Allí usa "Copia de seguridad" y aquí "Restaurar".'
+          : '');
     } else if (list.length === 0) {
       el.empty.textContent = 'Ningún producto coincide con la búsqueda o los filtros.';
     }
@@ -173,18 +217,54 @@
     renderTable();
   }
 
-  // ---------- Productos ----------
-  function openProductForm(product) {
+  // Guarda un producto y actualiza la lista en memoria solo si se guardó bien.
+  async function persist(p) {
+    await Store.saveProduct(p);
+    const i = state.products.findIndex(o => o.id === p.id);
+    if (i >= 0) state.products[i] = p; else state.products.push(p);
+  }
+
+  // ---------- Formulario de producto ----------
+  function updatePricePreview() {
+    const f = el.productForm.elements;
+    const cost = I.parseNumber(f.cost.value);
+    const price = I.parseNumber(f.price.value);
+    if (!(cost > 0) || !(price > 0)) { el.pricePreview.textContent = ''; return; }
+    const p = { cost, price };
+    el.pricePreview.textContent = `Ganancia ${money(price - cost)} por ${f.unit.value.trim() || 'unidad'} · ` +
+      `Recargo ${pct(I.markup(p))} · Margen ${pct(I.margin(p))}`;
+    el.pricePreview.classList.toggle('neg', price < cost);
+  }
+
+  // sku: código ya escaneado para un producto nuevo. rescan: modo rápido del escáner.
+  function openProductForm(product, { sku = '', rescan = false } = {}) {
     const f = el.productForm;
     f.reset();
+    state.rescanAfter = rescan;
     el.formError.hidden = true;
     el.productTitle.textContent = product ? 'Editar producto' : 'Nuevo producto';
-    const p = product || { unit: 'unidad' };
-    for (const name of ['id', 'sku', 'name', 'category', 'unit', 'cost', 'price', 'stock', 'minStock', 'notes']) {
-      f.elements[name].value = p[name] ?? '';
+    // Producto nuevo: si hay una categoría filtrada, viene elegida de antemano.
+    const p = product || { unit: 'unidad', category: el.filterCategory.value, sku };
+    for (const name of ['id', 'sku', 'name', 'unit', 'cost', 'price', 'stock', 'minStock', 'notes']) {
+      const v = p[name];
+      f.elements[name].value = typeof v === 'number' ? String(v).replace('.', ',') : (v ?? '');
     }
+    fillCategorySelect(p.category);
+    updatePricePreview();
     el.productDialog.showModal();
-    f.elements[product ? 'name' : 'sku'].focus();
+    f.elements[product || sku ? 'name' : 'sku'].focus();
+  }
+
+  // Botón de cámara junto al campo Código del formulario.
+  function scanIntoSkuField() {
+    openScanner('sku', (code) => {
+      const f = el.productForm.elements;
+      f.sku.value = code;
+      el.formError.hidden = true;
+      const dup = I.findBySku(state.products, code);
+      if (dup && dup.id !== f.id.value) showFormError(`El código "${code}" ya lo usa "${dup.name}".`, 'sku');
+      else f[f.name.value.trim() ? 'cost' : 'name'].focus();
+    });
   }
 
   function showFormError(msg, field) {
@@ -196,117 +276,312 @@
   async function saveProduct(e) {
     e.preventDefault();
     const raw = Object.fromEntries(new FormData(el.productForm));
-    const existing = state.products.find(p => p.id === raw.id);
-    const p = normalize(raw, existing);
-
-    if (!p.name) return showFormError('El nombre es obligatorio.', 'name');
-    for (const f of ['cost', 'price', 'stock', 'minStock']) {
-      const v = raw[f].trim();
-      if (v === '') continue;
-      if (!/^-?\d+([.,]\d+)?$/.test(v)) return showFormError(`"${v}" no es un número válido.`, f);
-      if (toNum(v) < 0) return showFormError('Los números no pueden ser negativos.', f);
+    if (raw.categoryChoice === NEW_CATEGORY) {
+      if (!raw.newCategory.trim()) return showFormError('Escribe el nombre de la nueva categoría o elige una existente.', 'newCategory');
+      // Si ya existe escrita de otra forma, se usa la existente para no duplicarla.
+      raw.category = I.resolveCategory(raw.newCategory, I.listCategories(state.products));
+    } else {
+      raw.category = raw.categoryChoice;
     }
-    if (p.sku) {
-      const dup = state.products.find(o => o.id !== p.id && (o.sku || '').toLowerCase() === p.sku.toLowerCase());
-      if (dup) return showFormError(`El código "${p.sku}" ya lo usa "${dup.name}".`, 'sku');
-    }
+    const problem = I.validateProduct(raw, state.products);
+    if (problem) return showFormError(problem.message, problem.field);
 
+    const existing = state.products.find(p => p.id === raw.id) || null;
+    const p = I.normalizeProduct(raw, { existing });
     try {
-      await DB.putProduct(p);
+      await persist(p);
     } catch (err) {
-      return showFormError(err?.name === 'ConstraintError'
-        ? 'Ya existe un producto con ese código.' : `No se pudo guardar: ${err?.message || err}`);
+      return showFormError(err && err.name === 'ConstraintError'
+        ? 'Ya existe un producto con ese código.' : `No se pudo guardar: ${errMsg(err)}`);
     }
-    if (existing) Object.assign(existing, p); else state.products.push(p);
     el.productDialog.close();
     renderAll();
     toast(existing ? 'Producto actualizado' : 'Producto creado');
+    if (state.rescanAfter) startLookupScan();
   }
 
-  async function adjustStock(p, delta) {
-    const next = round(p.stock + delta);
-    if (next < 0) return toast('El stock no puede ser negativo', true);
-    const updated = { ...p, stock: next, updatedAt: new Date().toISOString() };
+  // ---------- Ajuste de stock ----------
+  const ADJUST_LABELS = { in: 'Cantidad que entra', out: 'Cantidad que sale', set: 'Stock contado (total real)' };
+
+  function adjustMode() {
+    return el.adjustForm.elements.mode.value;
+  }
+
+  // Siempre se busca en la lista actual: el objeto se reemplaza al guardar.
+  const adjustingProduct = () => state.products.find(o => o.id === state.adjustingId) || null;
+
+  function updateAdjustPreview() {
+    const p = adjustingProduct();
+    if (!p) return;
+    el.adjustQtyLabel.textContent = ADJUST_LABELS[adjustMode()];
+    const qty = el.adjustForm.elements.qty.value;
+    el.adjustError.hidden = true;
+    if (qty.trim() === '') {
+      el.adjustPreview.textContent = `Stock actual: ${num(p.stock)} ${p.unit}`;
+      return;
+    }
+    const r = I.applyAdjustment(p.stock, adjustMode(), qty);
+    el.adjustPreview.textContent = r.error
+      ? r.error
+      : `Stock: ${num(p.stock)} → ${num(r.stock)} ${p.unit}`;
+    el.adjustPreview.classList.toggle('neg', !!r.error);
+  }
+
+  // Abre con el último tipo de ajuste usado y cantidad 1 seleccionada:
+  // con Enter se aplica directo, o se escribe encima otra cantidad.
+  function openAdjust(p, { rescan = false } = {}) {
+    state.adjustingId = p.id;
+    state.rescanAfter = rescan;
+    const f = el.adjustForm.elements;
+    el.adjustForm.reset();
+    f.mode.value = state.lastAdjustMode;
+    f.qty.value = state.lastAdjustMode === 'set' ? '' : '1';
+    el.adjustProduct.textContent = p.sku ? `${p.name} (${p.sku})` : p.name;
+    updateAdjustPreview();
+    el.adjustDialog.showModal();
+    f.qty.focus();
+    f.qty.select();
+  }
+
+  async function applyStock(p, stock) {
+    const updated = { ...p, stock, updatedAt: new Date().toISOString() };
+    await persist(updated);
+    renderStats();
+    renderTable();
+  }
+
+  async function submitAdjust(e) {
+    e.preventDefault();
+    const p = adjustingProduct();
+    if (!p) {
+      el.adjustDialog.close();
+      return toast('El producto ya no existe.', true);
+    }
+    const r = I.applyAdjustment(p.stock, adjustMode(), el.adjustForm.elements.qty.value);
+    if (r.error) {
+      el.adjustError.textContent = r.error;
+      el.adjustError.hidden = false;
+      el.adjustForm.elements.qty.focus();
+      return;
+    }
     try {
-      await DB.putProduct(updated);
-      Object.assign(p, updated);
-      renderStats();
-      renderTable();
+      await applyStock(p, r.stock);
     } catch (err) {
-      toast(`No se pudo actualizar: ${err?.message || err}`, true);
+      el.adjustError.textContent = `No se pudo guardar: ${errMsg(err)}`;
+      el.adjustError.hidden = false;
+      return;
+    }
+    state.lastAdjustMode = adjustMode();
+    el.adjustDialog.close();
+    toast(`${p.name}: ${num(p.stock)} → ${num(r.stock)} ${p.unit}`);
+    if (state.rescanAfter) startLookupScan();
+  }
+
+  // ---------- Escáner de códigos ----------
+  const scan = {
+    session: null,
+    token: null, // identifica el arranque en curso, para ignorar uno viejo si se cerró antes
+    onCode: null,
+    cameraId: prefs.get('scanCamera', null),
+    continuous: prefs.get('scanContinuous', false),
+  };
+
+  let audioCtx = null;
+  function beep() {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 1250;
+      gain.gain.value = 0.08;
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.09);
+    } catch { /* sin sonido */ }
+    if (navigator.vibrate) navigator.vibrate(60);
+  }
+
+  function setScanStatus(text, isError = false) {
+    el.scanStatus.textContent = text;
+    el.scanStatus.classList.toggle('neg', isError);
+  }
+
+  // purpose: 'lookup' (buscar producto y ajustar stock) o 'sku' (rellenar el campo Código).
+  function openScanner(purpose, onCode) {
+    scan.onCode = onCode;
+    el.scanManualInput.value = '';
+    el.scanContinuousWrap.hidden = purpose !== 'lookup';
+    el.scanContinuous.checked = scan.continuous;
+    el.scanDialog.classList.remove('found');
+    if (!el.scanDialog.open) el.scanDialog.showModal();
+    if (!Scanner.isSupported()) {
+      setScanStatus('Este navegador no permite usar la cámara. Puedes escribir el código abajo.', true);
+      el.scanManualInput.focus();
+      return;
+    }
+    startCamera();
+  }
+
+  async function startCamera() {
+    stopCamera();
+    const token = {};
+    scan.token = token;
+    setScanStatus('Abriendo la cámara…');
+    try {
+      const session = await Scanner.start({ video: el.scanVideo, deviceId: scan.cameraId, onResult: onScanned });
+      if (scan.token !== token) { session.stop(); return; } // se cerró mientras arrancaba
+      scan.session = session;
+      setScanStatus('Apunta al código de barras dentro del recuadro.');
+      await fillCameraSelect(session.deviceId);
+    } catch (err) {
+      if (scan.token !== token) return;
+      // La cámara guardada ya no está: probar con la predeterminada.
+      if (scan.cameraId && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError')) {
+        scan.cameraId = null;
+        prefs.set('scanCamera', null);
+        return startCamera();
+      }
+      setScanStatus(Scanner.friendlyError(err) + ' También puedes escribir el código abajo.', true);
     }
   }
 
+  function stopCamera() {
+    scan.token = null;
+    if (scan.session) {
+      scan.session.stop();
+      scan.session = null;
+    }
+  }
+
+  function closeScanner() {
+    stopCamera();
+    if (el.scanDialog.open) el.scanDialog.close();
+  }
+
+  async function fillCameraSelect(activeId) {
+    const cams = await Scanner.listCameras().catch(() => []);
+    el.scanCamera.hidden = cams.length < 2;
+    if (cams.length < 2) return;
+    el.scanCamera.innerHTML = cams.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.label)}</option>`).join('');
+    if (activeId) el.scanCamera.value = activeId;
+  }
+
+  function deliverCode(code) {
+    const onCode = scan.onCode;
+    closeScanner();
+    if (onCode) onCode(code);
+  }
+
+  function onScanned(code) {
+    scan.session = null; // el escáner ya se detuvo solo
+    beep();
+    el.scanDialog.classList.add('found');
+    setScanStatus(`Código leído: ${code}`);
+    setTimeout(() => deliverCode(code), 250); // un instante para ver el recuadro en verde
+  }
+
+  function startLookupScan() {
+    openScanner('lookup', (code) => lookupCode(code, { fromScanner: true }));
+  }
+
+  // Busca el producto por código: si existe, abre el ajuste; si no, ofrece crearlo.
+  async function lookupCode(code, { fromScanner = false } = {}) {
+    const clean = code.trim();
+    if (!clean) return;
+    const rescan = fromScanner && scan.continuous;
+    const p = I.findBySku(state.products, clean);
+    if (p) return openAdjust(p, { rescan });
+    const create = await confirmAction(`No hay ningún producto con el código "${clean}". ¿Quieres crearlo?`,
+      { okLabel: 'Crear producto', danger: false });
+    if (create) openProductForm(null, { sku: clean, rescan });
+    else if (rescan) startLookupScan();
+  }
+
+  async function quickAdjust(p, mode) {
+    const r = I.applyAdjustment(p.stock, mode, 1);
+    if (r.error) return toast(r.error, true);
+    try {
+      await applyStock(p, r.stock);
+    } catch (err) {
+      toast(`No se pudo actualizar: ${errMsg(err)}`, true);
+    }
+  }
+
+  // ---------- Eliminar ----------
   async function deleteProduct(p) {
     if (!(await confirmAction(`¿Eliminar "${p.name}"? Esta acción no se puede deshacer.`))) return;
-    await DB.deleteProduct(p.id);
+    try {
+      await Store.deleteProduct(p.id);
+    } catch (err) {
+      return toast(`No se pudo eliminar: ${errMsg(err)}`, true);
+    }
     state.products = state.products.filter(o => o.id !== p.id);
     renderAll();
     toast('Producto eliminado');
   }
 
-  // ---------- Exportar / importar ----------
-  function download(filename, content, type) {
-    const blob = new Blob([content], { type });
-    const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  const today = () => new Date().toISOString().slice(0, 10);
-
-  function exportBackup() {
-    const data = { app: 'inventario', version: 1, exportedAt: new Date().toISOString(),
-      settings: state.settings, products: state.products };
-    download(`inventario-copia-${today()}.json`, JSON.stringify(data, null, 2), 'application/json');
-    toast('Copia de seguridad descargada');
+  // ---------- Copias de seguridad y exportación ----------
+  async function exportBackup() {
+    const data = I.buildBackup(state.products, state.settings);
+    try {
+      const saved = await Platform.saveFile({
+        name: `inventario-copia-${today()}.json`,
+        content: JSON.stringify(data, null, 2),
+        mime: 'application/json',
+      });
+      if (saved) toast(`Copia de seguridad guardada (${state.products.length} productos)`);
+    } catch (err) {
+      toast(`No se pudo guardar la copia: ${errMsg(err)}`, true);
+    }
   }
 
-  function exportCsv() {
-    const cols = [['sku', 'Código'], ['name', 'Nombre'], ['category', 'Categoría'], ['unit', 'Unidad'],
-      ['stock', 'Stock'], ['minStock', 'Stock mínimo'], ['cost', 'Costo'], ['price', 'Precio'], ['notes', 'Notas']];
-    const cell = (v) => {
-      let s = typeof v === 'number' ? String(v).replace('.', ',') : String(v ?? '');
-      // Evita que Excel interprete el texto como fórmula.
-      if (/^[=+\-@]/.test(s) && typeof v !== 'number') s = "'" + s;
-      return /[;"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const rows = [cols.map(c => c[1]).join(';'),
-      ...filtered().map(p => cols.map(([k]) => cell(p[k])).join(';'))];
-    // BOM para que Excel reconozca los acentos.
-    download(`inventario-${today()}.csv`, '﻿' + rows.join('\r\n'), 'text/csv;charset=utf-8');
-    toast('CSV descargado');
+  async function exportCsv() {
+    const list = visibleProducts();
+    try {
+      const saved = await Platform.saveFile({
+        name: `inventario-${today()}.csv`,
+        content: I.buildCsv(list),
+        mime: 'text/csv;charset=utf-8',
+      });
+      if (saved) toast(`CSV guardado (${list.length} productos)`);
+    } catch (err) {
+      toast(`No se pudo guardar el CSV: ${errMsg(err)}`, true);
+    }
   }
 
-  async function restoreBackup(file) {
+  async function restoreBackup() {
+    let file;
+    try {
+      file = await Platform.openFile({ accept: '.json,application/json' });
+    } catch (err) {
+      return toast(`No se pudo leer el archivo: ${errMsg(err)}`, true);
+    }
+    if (!file) return;
+
     let data;
     try {
-      data = JSON.parse(await file.text());
+      data = JSON.parse(file.text);
     } catch {
-      return toast('El archivo no es una copia de seguridad válida', true);
+      return toast('El archivo no es una copia de seguridad válida.', true);
     }
-    const list = Array.isArray(data) ? data : data?.products;
-    if (!Array.isArray(list)) return toast('El archivo no contiene productos', true);
+    const result = I.prepareImport(data);
+    if (result.error) return toast(result.error, true);
 
-    const products = list.map(r => normalize(r)).filter(p => p.name);
-    const seen = new Set();
-    for (const p of products) {
-      const key = p.sku?.toLowerCase();
-      if (key && seen.has(key)) return toast(`Código repetido en la copia: "${p.sku}"`, true);
-      if (key) seen.add(key);
-    }
-    if (!(await confirmAction(`Se reemplazarán los ${state.products.length} productos actuales por los ${products.length} de la copia. ¿Continuar?`))) return;
+    let msg = `Se reemplazarán los ${state.products.length} productos actuales por los ${result.products.length} de la copia.`;
+    if (result.skipped) msg += ` ${result.skipped} registro(s) de la copia no tienen nombre y se omitirán.`;
+    if (!(await confirmAction(msg + ' ¿Continuar?'))) return;
 
-    await DB.replaceAllProducts(products);
-    state.products = products;
-    if (data.settings?.storeName) {
-      state.settings = { ...state.settings, ...data.settings };
-      await DB.setSetting('general', state.settings);
+    try {
+      await Store.replaceAllProducts(result.products);
+      if (result.settings) await Store.saveSettings(result.settings);
+    } catch (err) {
+      return toast(`No se pudo restaurar: ${errMsg(err)}. No se cambió nada.`, true);
     }
+    state.products = result.products;
+    if (result.settings) state.settings = result.settings;
     renderAll();
-    toast(`Restaurados ${products.length} productos`);
+    toast(`Restaurados ${result.products.length} productos` +
+      (result.skipped ? ` (${result.skipped} omitidos por no tener nombre)` : ''));
   }
 
   // ---------- Ajustes ----------
@@ -314,16 +589,34 @@
     el.settingsForm.elements.storeName.value = state.settings.storeName;
     el.settingsForm.elements.currency.value = state.settings.currency;
     el.settingsDialog.showModal();
+    showDesktopDataInfo();
+  }
+
+  // Solo en la app de escritorio: dónde están los datos y botón para abrir la carpeta.
+  async function showDesktopDataInfo() {
+    const api = window.desktopAPI;
+    const box = $('#desktop-data');
+    if (!api || !api.getInfo) { box.hidden = true; return; }
+    try {
+      const info = await api.getInfo();
+      $('#desktop-data-path').textContent = info.dataDir;
+      box.hidden = false;
+    } catch {
+      box.hidden = true;
+    }
   }
 
   async function saveSettings(e) {
     e.preventDefault();
     const f = el.settingsForm.elements;
-    const storeName = f.storeName.value.trim();
-    const currency = f.currency.value.trim();
-    if (!storeName || !currency) return;
-    state.settings = { ...state.settings, storeName, currency };
-    await DB.setSetting('general', state.settings);
+    if (!f.storeName.value.trim() || !f.currency.value.trim()) return;
+    const settings = I.normalizeSettings({ storeName: f.storeName.value, currency: f.currency.value });
+    try {
+      await Store.saveSettings(settings);
+    } catch (err) {
+      return toast(`No se pudieron guardar los ajustes: ${errMsg(err)}`, true);
+    }
+    state.settings = settings;
     el.settingsDialog.close();
     renderAll();
     toast('Ajustes guardados');
@@ -333,22 +626,75 @@
   function bindEvents() {
     $('#btn-new').addEventListener('click', () => openProductForm(null));
     $('#btn-settings').addEventListener('click', openSettings);
+    $('#btn-open-data').addEventListener('click', () => {
+      window.desktopAPI.openDataFolder().catch(err => toast(`No se pudo abrir la carpeta: ${errMsg(err)}`, true));
+    });
     $('#btn-backup').addEventListener('click', exportBackup);
     $('#btn-export-csv').addEventListener('click', exportCsv);
-    $('#input-restore').addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      e.target.value = '';
-      if (file) restoreBackup(file);
-    });
+    $('#btn-restore').addEventListener('click', restoreBackup);
 
     el.productForm.addEventListener('submit', saveProduct);
+    el.categorySelect.addEventListener('change', () => toggleNewCategory());
+
+    // Escáner
+    $('#btn-scan').addEventListener('click', startLookupScan);
+    $('#btn-scan-sku').addEventListener('click', scanIntoSkuField);
+    $('#scan-cancel').addEventListener('click', closeScanner);
+    el.scanDialog.addEventListener('cancel', stopCamera); // tecla Esc
+    el.scanDialog.addEventListener('close', stopCamera);
+    el.scanCamera.addEventListener('change', () => {
+      scan.cameraId = el.scanCamera.value;
+      prefs.set('scanCamera', scan.cameraId);
+      startCamera();
+    });
+    el.scanContinuous.addEventListener('change', () => {
+      scan.continuous = el.scanContinuous.checked;
+      prefs.set('scanContinuous', scan.continuous);
+    });
+    el.scanManual.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const code = el.scanManualInput.value.trim();
+      if (code) deliverCode(code);
+    });
+    // El recuadro guía debe coincidir con la imagen real (algunas cámaras son 4:3).
+    el.scanVideo.addEventListener('loadedmetadata', () => {
+      const { videoWidth: w, videoHeight: h } = el.scanVideo;
+      if (w && h) el.scanView.style.aspectRatio = `${w} / ${h}`;
+    });
+
+    // Lector USB o código escrito en el buscador + Enter: igual que escanear con la cámara.
+    el.search.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const code = el.search.value.trim();
+      if (I.findBySku(state.products, code) || I.looksLikeBarcode(code)) {
+        e.preventDefault();
+        el.search.select(); // el próximo escaneo reemplaza el texto
+        lookupCode(code);
+      }
+    });
+    el.productForm.addEventListener('input', (e) => {
+      if (['cost', 'price', 'unit'].includes(e.target.name)) updatePricePreview();
+    });
+    el.adjustForm.addEventListener('submit', submitAdjust);
+    el.adjustForm.addEventListener('input', updateAdjustPreview);
+    el.adjustForm.addEventListener('change', () => {
+      updateAdjustPreview();
+      el.adjustForm.elements.qty.focus();
+    });
     el.settingsForm.addEventListener('submit', saveSettings);
     document.querySelectorAll('[data-close]').forEach(b =>
       b.addEventListener('click', () => b.closest('dialog').close()));
 
     el.search.addEventListener('input', renderTable);
     el.filterCategory.addEventListener('change', renderTable);
-    el.filterLow.addEventListener('change', renderTable);
+    el.filterStatus.addEventListener('change', renderTable);
+
+    // Las tarjetas "Stock bajo" y "Sin stock" filtran la tabla (clic de nuevo para quitar).
+    document.querySelectorAll('.stat[data-status]').forEach(card => card.addEventListener('click', () => {
+      const s = card.dataset.status;
+      el.filterStatus.value = el.filterStatus.value === s ? '' : s;
+      renderTable();
+    }));
 
     document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
       const key = th.dataset.sort;
@@ -361,8 +707,14 @@
       if (!btn) return;
       const p = state.products.find(o => o.id === btn.closest('tr').dataset.id);
       if (!p) return;
-      ({ inc: () => adjustStock(p, 1), dec: () => adjustStock(p, -1),
-         edit: () => openProductForm(p), delete: () => deleteProduct(p) })[btn.dataset.action]();
+      const actions = {
+        inc: () => quickAdjust(p, 'in'),
+        dec: () => quickAdjust(p, 'out'),
+        adjust: () => openAdjust(p),
+        edit: () => openProductForm(p),
+        delete: () => deleteProduct(p),
+      };
+      actions[btn.dataset.action]();
     });
 
     // Atajo: "/" enfoca el buscador (útil con lector de código de barras).
@@ -377,12 +729,18 @@
   // ---------- Inicio ----------
   async function init() {
     bindEvents();
+    if (!Store) {
+      toast(`No se pudo abrir el almacenamiento: ${errMsg(window.StoreError)}`, true);
+      renderAll();
+      return;
+    }
+    $('#demo-banner').hidden = Store.kind !== 'demo';
     try {
-      const [products, settings] = await Promise.all([DB.getAllProducts(), DB.getSetting('general')]);
+      const [products, settings] = await Promise.all([Store.listProducts(), Store.getSettings()]);
       state.products = products;
-      if (settings) state.settings = { ...state.settings, ...settings };
+      if (settings) state.settings = I.normalizeSettings(settings);
     } catch (err) {
-      toast(`No se pudo abrir la base de datos: ${err?.message || err}`, true);
+      toast(`No se pudo abrir la base de datos: ${errMsg(err)}`, true);
     }
     renderAll();
   }
